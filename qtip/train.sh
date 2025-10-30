@@ -67,16 +67,3 @@ run_conda_cmd python quantize_finetune_llama.py \
     --tlut_bits 9
 
 run_conda_cmd python hfize_llama.py --quantized_path $ckpt_path --hf_output_path $hf_path
-
-# Use all devices
-run_conda_cmd python finetune_e2e_llama.py \
-    --base_model $model \
-    --hf_path $hf_path \
-    --devset_size 640 \
-    --ft_valid_size 128 \
-    --ft_epochs 4 \
-    --ft_update_freq 4 \
-    --ft_bs 2 \
-    --ctx_size 4096 \
-    --ft_train_lut \
-    --hf_output_path $hf_output_path

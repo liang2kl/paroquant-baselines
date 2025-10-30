@@ -5,7 +5,7 @@ lm_eval==0.4.2
 numpy==1.23.4
 torch==2.2.2
 tqdm==4.64.1
-transformers==4.40.1
+transformers==4.55.2
 triton==2.2.0
 termcolor
 sentencepiece
