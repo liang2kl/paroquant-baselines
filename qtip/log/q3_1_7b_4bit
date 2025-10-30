@@ -1,0 +1,18 @@
+/home/zhijian/miniconda3/envs/qtip-2.6.0/bin/python: No module named quantize_llama.quantize_finetune_llama
+I1012 19:51:22.323230 1201930 utils.py:151] Note: NumExpr detected 64 cores but "NUMEXPR_MAX_THREADS" not set, so enforcing safe limit of 16.
+I1012 19:51:22.323317 1201930 utils.py:164] NumExpr defaulting to 16 threads.
+I1012 19:51:22.544401 1201930 config.py:58] PyTorch version 2.6.0 available.
+Traceback (most recent call last):
+  File "/home/zhijian/hc-workspace/qtip/quantize_finetune_llama.py", line 219, in <module>
+    main(args)
+  File "/home/zhijian/hc-workspace/qtip/quantize_finetune_llama.py", line 106, in main
+    cb = bitshift.bitshift_codebook(L=args.L,
+  File "/home/zhijian/hc-workspace/qtip/lib/codebook/bitshift.py", line 155, in __init__
+    clusters = scipy.cluster.vq.kmeans(data, tlut)
+  File "/home/zhijian/miniconda3/envs/qtip-2.6.0/lib/python3.10/site-packages/scipy/cluster/vq.py", line 479, in kmeans
+    return _kmeans(obs, guess, thresh=thresh, xp=xp)
+  File "/home/zhijian/miniconda3/envs/qtip-2.6.0/lib/python3.10/site-packages/scipy/cluster/vq.py", line 313, in _kmeans
+    obs_code, distort = vq(obs, code_book, check_finite=False)
+  File "/home/zhijian/miniconda3/envs/qtip-2.6.0/lib/python3.10/site-packages/scipy/cluster/vq.py", line 215, in vq
+    result = _vq.vq(c_obs, c_code_book)
+KeyboardInterrupt
