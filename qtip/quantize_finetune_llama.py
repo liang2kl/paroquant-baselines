@@ -1,0 +1,245 @@
+import argparse
+import os
+import time
+
+import glog
+
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
+
+import torch
+import torch.multiprocessing as mp
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from model.qwen3_fp16 import Qwen3ForCausalLMFP16
+from transformers.modeling_attn_mask_utils import \
+    _prepare_4d_causal_attention_mask
+
+from lib import utils
+from lib.algo import finetune
+from lib.codebook import bitshift
+from operator import attrgetter
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--seed', default=0, type=int)
+parser.add_argument('--num_cpu_threads', default=8, type=int)
+parser.add_argument('--batch_size', default=16, type=int)
+parser.add_argument('--devset_size', default=384, type=int)
+parser.add_argument('--ctx_size', default=4096, type=int)
+parser.add_argument('--save_path', type=str)
+parser.add_argument('--in_hess_path', type=str)
+parser.add_argument('--base_model', type=str)
+parser.add_argument('--sigma_reg', default=1e-2, type=float)
+parser.add_argument('--sigma_reg2', default=1e-2, type=float)
+parser.add_argument('--scale_override', default=-1, type=float)
+parser.add_argument('--codebook', type=str)
+parser.add_argument('--use_fp64', action='store_true')
+parser.add_argument('--no_use_buffered', action='store_true')
+parser.add_argument('--sample_proc', default=1, type=int)
+parser.add_argument('--lowmem_ldlq', action='store_true')
+parser.add_argument('--ft_lr', default=3e-6, type=float)
+parser.add_argument('--ft_bs', default=4, type=int)
+parser.add_argument('--ft_update_freq', default=1, type=int)
+parser.add_argument('--ft_epochs', default=5, type=int)
+parser.add_argument('--ft_valid_freq', default=1, type=int)
+parser.add_argument('--ft_valid_size', default=128, type=float)
+parser.add_argument('--ft_early_stop', default=5, type=int)
+parser.add_argument('--ft_grad_ckpt', action='store_true')
+parser.add_argument('--td_x', default=16, type=int)
+parser.add_argument('--td_y', default=16, type=int)
+parser.add_argument('--L', default=16, type=int)
+parser.add_argument('--K', default=4, type=int)
+parser.add_argument('--V', default=2, type=int)
+parser.add_argument('--tlut_bits', default=0, type=int)
+parser.add_argument('--decode_mode', default='lut', type=str)
+parser.add_argument('--ft_train_lut', action='store_true')
+parser.add_argument('--split_for_tp', action='store_true')
+parser.add_argument('--tp_rank', default=8, type=int)
+parser.add_argument('--skip_list', default=None, type=str)
+
+
+def check_exist(idx, args):
+    suffix = ['q', 'k', 'v', 'o', 'up', 'down', 'layernorm']
+    for _ in suffix:
+        test = f'{args.save_path}/{idx}_{_}.pt'
+        if not os.path.exists(test):
+            return False
+    return True
+
+
+def quantize_llama_decoder(layer, idx, cb, args, device, pre_orig_emb,
+                           orig_emb, model_config, skip_list):
+    glog.info(f'quantize_llama_decoder layer {idx} on device {device}')
+    if check_exist(idx, args):
+        return
+
+    if skip_list is None:
+        skip_list = []
+        
+    # layer name, save_name, input hessian file, output hessian file
+    quant_order = []
+    for thing in [('self_attn.v_proj', 'v', 'qkv', 'v', 'col'),
+                  ('self_attn.q_proj', 'q', 'qkv', 'q', 'col'),
+                  ('self_attn.k_proj', 'k', 'qkv', 'k', 'col'),
+                  ('self_attn.o_proj', 'o', 'o', 'o', 'row'),
+                  ('mlp.up_proj', 'up', 'up', 'up', 'col'),
+                  ('mlp.gate_proj', 'gate', 'up', 'gate', 'col'),
+                  ('mlp.down_proj', 'down', 'down', 'down', 'row')]:
+        if f'{idx}_{thing[1]}' not in skip_list:
+            quant_order.append(thing)
+        else:
+            attrgetter(thing[0])(layer).weight.requires_grad = False
+            print(f'skipping {idx}_{thing[1]}')
+        
+    finetune.quantize_finetune_decoder_layer(layer, quant_order, idx, cb, args,
+                                             device, pre_orig_emb, orig_emb)
+    torch.save(
+        {
+            'input_layernorm': layer.input_layernorm.weight,
+            'post_attention_layernorm': layer.post_attention_layernorm.weight,
+        }, f'{args.save_path}/{idx}_layernorm.pt')
+
+
+def main(args):
+    if args.skip_list is not None:
+        args.skip_list = args.skip_list.split(',')
+        
+    dtype_ = torch.float64 if args.use_fp64 else torch.float32
+
+    cb = bitshift.bitshift_codebook(L=args.L,
+                                    K=args.K,
+                                    V=args.V,
+                                    tlut_bits=args.tlut_bits,
+                                    decode_mode=args.decode_mode)
+    # model = AutoModelForCausalLM.from_pretrained(args.base_model,
+    #                                              torch_dtype='auto',
+    #                                              low_cpu_mem_usage=True)
+    model = Qwen3ForCausalLMFP16.from_pretrained(args.base_model,
+                                                 torch_dtype='auto',
+                                                 low_cpu_mem_usage=True)
+
+    # save configs
+    all_config = {'quant_args': args, 'model_config': model.config}
+    quip_params = {
+        'codebook': args.codebook,
+        'codebook_version': cb.version,
+        'L': args.L,
+        'K': args.K,
+        'V': args.V,
+        'tlut_bits': args.tlut_bits,
+        'decode_mode': args.decode_mode,
+        'td_x': args.td_x,
+        'td_y': args.td_y,
+        'split_for_tp': args.split_for_tp,
+        'skip_list': args.skip_list,
+    }
+    all_config['model_config'].update({'quip_params': quip_params})
+    torch.save(all_config, os.path.join(args.save_path, 'config.pt'))
+
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    tokenizer.pad_token = tokenizer.eos_token
+    glog.info('loaded model')
+
+    devset = utils.sample_rp1t(tokenizer, args.devset_size, args.ctx_size,
+                               args.sample_proc)
+    glog.info('loaded dataset and devset')
+
+    nproc = torch.cuda.device_count()
+    assert nproc == 1
+    orig_emb_cache = [model.model.embed_tokens(devset)]
+
+    for _ in range(nproc):
+        orig_emb_cache.append(
+            torch.zeros(orig_emb_cache[0].shape,
+                        dtype=orig_emb_cache[0].dtype,
+                        device=orig_emb_cache[0].device))
+
+    position_ids = torch.arange(args.ctx_size, dtype=torch.int32)[None, :] + \
+        torch.zeros(args.batch_size, args.ctx_size, dtype=torch.int32)
+    position_ids = position_ids.cuda()
+    # rotary_emb_module = model.model.rotary_emb.cuda()
+    # dummy_tensor_for_rope = orig_emb_cache[0][:1].cuda() 
+    # position_embeddings = rotary_emb_module(dummy_tensor_for_rope, position_ids=position_ids)
+    attention_mask = _prepare_4d_causal_attention_mask(
+        None, (args.batch_size, args.ctx_size),
+        orig_emb_cache[0][:args.batch_size], 0)
+
+    cur_device_idx = 0
+
+    # Loop through each layer sequentially
+    for i in range(len(model.model.layers)):
+        device = f'cuda:{cur_device_idx}'
+        glog.info(f'Processing layer {i} on device {device}')
+
+        # When we loop back to the first GPU, its input cache must be updated
+        # with the output from the last GPU's computation.
+        if cur_device_idx == 0 and i > 0:
+            orig_emb_cache[0].copy_(orig_emb_cache[-1])
+            utils.clean()
+
+        # --- 1. Compute layer output (Forward Pass) ---
+        st = time.time()
+        
+        # Move the current layer and inputs to the assigned GPU
+        layer = model.model.layers[i]
+        layer.to(device)
+        position_ids = position_ids.to(device)
+        attention_mask = attention_mask.to(device)
+
+        # Perform the forward pass in batches
+        for j in range(args.devset_size // args.batch_size):
+            utils.clean()
+            batch_start = args.batch_size * j
+            batch_end = args.batch_size * (j + 1)
+            
+            input_tensor = orig_emb_cache[cur_device_idx][batch_start:batch_end].to(device)
+            
+            # Execute the forward pass
+            with torch.no_grad():
+                output_tensor = layer(
+                    input_tensor,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                    output_attentions=False
+                )[0]
+            
+            # Store the output back in the corresponding cache on the CPU
+            orig_emb_cache[cur_device_idx + 1][batch_start:batch_end] = output_tensor.cpu()
+
+        # Clean up GPU memory by moving objects back to the CPU
+        layer.cpu()
+        position_ids = position_ids.cpu()
+        attention_mask = attention_mask.cpu()
+        utils.clean()
+        glog.info(f'Computed original embedding for layer {i} in {time.time() - st:.2f}s')
+
+        # --- 2. Quantize the Layer ---
+        # Call the quantization function directly instead of creating a new process
+        quantize_llama_decoder(
+            layer,
+            i,
+            cb,
+            args,
+            cur_device_idx,
+            orig_emb_cache[cur_device_idx],
+            orig_emb_cache[cur_device_idx + 1],
+            all_config['model_config'],
+            args.skip_list,
+        )
+
+        # --- 3. Clean Up and Prepare for Next Iteration ---
+        # Free the memory of the original layer, as it has now been quantized
+        model.model.layers[i] = None
+        utils.clean()
+        
+        # Advance to the next device for the next layer
+        cur_device_idx = (cur_device_idx + 1) % nproc
+
+
+if __name__ == '__main__':
+    torch.set_grad_enabled(False)
+    # mp.set_start_method('spawn')
+    # mp.set_sharing_strategy('file_system')
+    args = parser.parse_args()
+    torch.manual_seed(args.seed)
+    os.makedirs(args.save_path, exist_ok=True)
+    main(args)
