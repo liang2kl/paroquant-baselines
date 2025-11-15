@@ -28,19 +28,14 @@ import shutil
 import os
 
 
-def update_dataset(layer, dataset, dev, **kwargs):
+def update_dataset(layer, dataset, dev, kwargs):
     with torch.no_grad():
         with torch.cuda.amp.autocast():
             for index, inps in enumerate(dataset):
                 inps = inps.to(dev)
                 if len(inps.shape) == 2:
                     inps = inps.unsqueeze(0)
-                new_data = layer(
-                    inps,
-                    **kwargs,
-                )[
-                    0
-                ].to("cpu")
+                new_data = layer(inps, **kwargs)[0].to("cpu")
                 dataset.update_data(index, new_data)
 
 
@@ -114,21 +109,20 @@ def block_ap(
     class Catcher(nn.Module):
         def __init__(self, module, dataset):
             super().__init__()
-            self.module = module
+            object.__setattr__(self, "module", module)
             self.dataset = dataset
             self.index = 0
-            self.attention_mask = None
-            self.position_ids = None
+            self.kwargs = None
 
         def forward(self, inp, **kwargs):
             self.dataset.update_data(self.index, inp.squeeze(0).to("cpu"))
             self.index += 1
-            if "use_cache" in kwargs:
-                kwargs["use_cache"] = False
-            if "past_key_value" in kwargs:
-                kwargs["past_key_value"] = None
-            self.kwargs = kwargs
+            if self.kwargs is None:
+                self.kwargs = kwargs
             raise ValueError
+
+        def __getattr__(self, name):
+            return getattr(self.module, name)
 
     # step 3.1: catch the input of training set
     layers[0] = Catcher(layers[0], fp_train_inps)
@@ -165,17 +159,8 @@ def block_ap(
             except ValueError:
                 pass
     kwargs = layers[0].kwargs
-    attention_mask = kwargs.get("attention_mask", None)
-    del kwargs["attention_mask"]
+    kwargs["use_cache"] = False
     layers[0] = layers[0].module
-    if attention_mask is not None:
-        attention_mask_batch = attention_mask.repeat(args.batch_size, 1, 1, 1).float()
-    else:
-        logger.info(
-            "No attention mask caught from the first layer."
-            " Seems that model's attention works without a mask."
-        )
-        attention_mask_batch = None
 
     # step 4: move embedding layer and first layer to cpu
     layers[0] = layers[0].cpu()
@@ -254,12 +239,8 @@ def block_ap(
             qlayer, weight_quant=False
         )  # deactivate quantization for obtaining ground truth
         if args.epochs > 0:
-            update_dataset(
-                qlayer, fp_train_inps, dev, attention_mask=attention_mask, **kwargs
-            )
-            update_dataset(
-                qlayer, fp_val_inps, dev, attention_mask=attention_mask, **kwargs
-            )
+            update_dataset(qlayer, fp_train_inps, dev, kwargs)
+            update_dataset(qlayer, fp_val_inps, dev, kwargs)
         set_quant_state(qlayer, weight_quant=True)  # activate quantization
 
         if args.epochs > 0:
@@ -324,15 +305,14 @@ def block_ap(
                         label = fp_inps.to(dev)
                         quant_out = qlayer(
                             input,
-                            attention_mask=attention_mask_batch,
                             **kwargs,
                         )[0]
                         reconstruction_loss = loss_func(label, quant_out)
                         loss = reconstruction_loss
 
                     if not math.isfinite(loss.item()):
-                        logger.info("Loss is NAN, stopping training")
-                        pdb.set_trace()
+                        logger.info("Loss is NAN")
+                        continue
                     loss_list.append(reconstruction_loss.detach().cpu())
                     optimizer.zero_grad()
                     norm = loss_scaler(
@@ -362,11 +342,7 @@ def block_ap(
                         with torch.cuda.amp.autocast():
                             input = quant_inps.to(dev)
                             label = fp_inps.to(dev)
-                            quant_out = qlayer(
-                                input,
-                                attention_mask=attention_mask_batch,
-                                **kwargs,
-                            )[0]
+                            quant_out = qlayer(input, **kwargs)[0]
                             reconstruction_loss = loss_func(label, quant_out)
                     val_loss_list.append(reconstruction_loss.cpu())
 
@@ -395,12 +371,8 @@ def block_ap(
 
         # step 6.7: update inputs of quantization model
         if args.epochs > 0:
-            update_dataset(
-                qlayer, quant_train_inps, dev, attention_mask=attention_mask, **kwargs
-            )
-            update_dataset(
-                qlayer, quant_val_inps, dev, attention_mask=attention_mask, **kwargs
-            )
+            update_dataset(qlayer, quant_train_inps, dev, kwargs)
+            update_dataset(qlayer, quant_val_inps, dev, kwargs)
         layers[block_index] = qlayer.to("cpu")
 
         # step 7: pack quantized weights into low-bits format, note that this process is slow on poor CPU or busy CPU

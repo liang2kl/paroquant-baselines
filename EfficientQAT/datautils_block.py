@@ -51,16 +51,34 @@ def get_wikitext2(tokenizer, train_size, val_size, seed, seqlen, test_only):
 
 def get_c4(tokenizer, train_size, val_size, seed, seqlen, test_only):
     print("get_c4")
-    traindata = load_dataset(
-        "allenai/c4",
-        data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
-        split="train",
-    )
-    valdata = load_dataset(
-        "allenai/c4",
-        data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"},
-        split="validation",
-    )
+    try:
+        # set local path for faster loading
+        traindata = load_dataset(
+            "arrow",
+            data_files={
+                "train": "/cpfs01/user/chenmengzhao/huggingface/datasets/allenai___json/allenai--c4-6fbe877195f42de5/0.0.0/0f7e3662623656454fcd2b650f34e886a7db4b9104504885bd462096cc7a9f51/json-train-00000-of-00002.arrow",
+                "validation": "/cpfs01/user/chenmengzhao/huggingface/datasets/allenai___json/allenai--c4-efc3d4f4606f44bd/0.0.0/fe5dd6ea2639a6df622901539cb550cf8797e5a6b2dd7af1cf934bed8e233e6e/json-validation.arrow",
+            },
+            split="train",
+        )
+        valdata = load_dataset(
+            "arrow",
+            data_files={
+                "validation": "/cpfs01/user/chenmengzhao/huggingface/datasets/allenai___json/allenai--c4-efc3d4f4606f44bd/0.0.0/fe5dd6ea2639a6df622901539cb550cf8797e5a6b2dd7af1cf934bed8e233e6e/json-validation.arrow",
+            },
+            split="validation",
+        )
+    except:
+        traindata = load_dataset(
+            "allenai/c4",
+            data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
+            split="train",
+        )
+        valdata = load_dataset(
+            "allenai/c4",
+            data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"},
+            split="validation",
+        )
 
     random.seed(0)
     valenc = []
@@ -171,233 +189,59 @@ def get_loaders(
         raise NotImplementedError
 
 
-# ============================ PPL ============================
-
-
-def get_wikitext2_ppl(nsamples, seed, seqlen, tokenizer):
-    from datasets import load_dataset
-
-    traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-
-    from transformers import AutoTokenizer
-
-    trainenc = tokenizer("\n\n".join(traindata["text"]), return_tensors="pt")
-    testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
-
-    import random
-
-    random.seed(seed)
-    trainloader = []
-    for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
-        tar = inp.clone()
-        tar[:, :-1] = -100
-        trainloader.append((inp, tar))
-    return trainloader, testenc
-
-
-def get_ptb_ppl(nsamples, seed, seqlen, tokenizer):
-    from datasets import load_dataset
-
-    traindata = load_dataset("ptb_text_only", "penn_treebank", split="train")
-    valdata = load_dataset("ptb_text_only", "penn_treebank", split="validation")
-
-    from transformers import AutoTokenizer
-
-    trainenc = tokenizer("\n\n".join(traindata["sentence"]), return_tensors="pt")
-    testenc = tokenizer("\n\n".join(valdata["sentence"]), return_tensors="pt")
-
-    import random
-
-    random.seed(seed)
-    trainloader = []
-    for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
-        tar = inp.clone()
-        tar[:, :-1] = -100
-        trainloader.append((inp, tar))
-    return trainloader, testenc
-
-
-def get_c4_ppl(nsamples, seed, seqlen, tokenizer):
-    from datasets import load_dataset
-
-    traindata = load_dataset(
-        "allenai/c4",
-        data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
-        split="train",
-    )
-    valdata = load_dataset(
-        "allenai/c4",
-        data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"},
-        split="validation",
-    )
-    import random
-
-    random.seed(seed)
-    trainloader = []
-    for _ in range(nsamples):
-        while True:
-            i = random.randint(0, len(traindata) - 1)
-            trainenc = tokenizer(traindata[i]["text"], return_tensors="pt")
-            if trainenc.input_ids.shape[1] >= seqlen:
-                break
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
-        tar = inp.clone()
-        tar[:, :-1] = -100
-        trainloader.append((inp, tar))
-
-    import random
-
-    random.seed(0)
-    valenc = []
-    for _ in range(256):
-        while True:
-            i = random.randint(0, len(valdata) - 1)
-            tmp = tokenizer(valdata[i]["text"], return_tensors="pt")
-            if tmp.input_ids.shape[1] >= seqlen:
-                break
-        i = random.randint(0, tmp.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        valenc.append(tmp.input_ids[:, i:j])
-    valenc = torch.hstack(valenc)
-
-    class TokenizerWrapper:
-
-        def __init__(self, input_ids):
-            self.input_ids = input_ids
-
-    valenc = TokenizerWrapper(valenc)
-
-    return trainloader, valenc
-
-
-def get_ptb_new_ppl(nsamples, seed, seqlen, tokenizer):
-    from datasets import load_dataset
-
-    traindata = load_dataset("ptb_text_only", "penn_treebank", split="train")
-    testdata = load_dataset("ptb_text_only", "penn_treebank", split="test")
-
-    from transformers import AutoTokenizer
-
-    trainenc = tokenizer(" ".join(traindata["sentence"]), return_tensors="pt")
-    testenc = tokenizer(" ".join(testdata["sentence"]), return_tensors="pt")
-
-    import random
-
-    random.seed(seed)
-    trainloader = []
-    for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
-        tar = inp.clone()
-        tar[:, :-1] = -100
-        trainloader.append((inp, tar))
-    return trainloader, testenc
-
-
-def get_c4_new_ppl(nsamples, seed, seqlen, tokenizer):
-    from datasets import load_dataset
-
-    traindata = load_dataset(
-        "allenai/c4",
-        data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
-        split="train",
-    )
-    valdata = load_dataset(
-        "allenai/c4",
-        data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"},
-        split="validation",
-    )
-
-    import random
-
-    random.seed(seed)
-    trainloader = []
-    for _ in range(nsamples):
-        while True:
-            i = random.randint(0, len(traindata) - 1)
-            trainenc = tokenizer(traindata[i]["text"], return_tensors="pt")
-            if trainenc.input_ids.shape[1] >= seqlen:
-                break
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
-        tar = inp.clone()
-        tar[:, :-1] = -100
-        trainloader.append((inp, tar))
-
-    valenc = tokenizer(" ".join(valdata[:1100]["text"]), return_tensors="pt")
-    valenc = valenc.input_ids[:, : (256 * seqlen)]
-
-    class TokenizerWrapper:
-
-        def __init__(self, input_ids):
-            self.input_ids = input_ids
-
-    valenc = TokenizerWrapper(valenc)
-
-    return trainloader, valenc
-
-
-def get_test_tokens_ppl(name, seed=0, seqlen=2048, tokenizer=None):
-    train_samples = 0
-    if name == "wikitext2":
-        return get_wikitext2_ppl(train_samples, seed, seqlen, tokenizer)[1]["input_ids"]
-    elif name == "c4":
-        return get_c4_ppl(train_samples, seed, seqlen, tokenizer)[1].input_ids
-    elif name == "c4_new":
-        return get_c4_new_ppl(train_samples, seed, seqlen, tokenizer)[1].input_ids
-    elif name == "ptb":
-        return get_ptb_ppl(train_samples, seed, seqlen, tokenizer)[1]["input_ids"]
-    elif name == "ptb_new":
-        return get_ptb_new_ppl(train_samples, seed, seqlen, tokenizer)[1]["input_ids"]
-    else:
-        raise Exception
-
-
 @torch.no_grad()
-def test_ppl(model, tokenizer, datasets=["wikitext2"], ppl_seqlen=2048):
+def test_ppl(model, tokenizer, datasets=["wikitext2"], ppl_seqlen=4096):
     results = {}
-    for dataset in ["wikitext2", "ptb", "c4", "ptb_new", "c4_new"]:
-        seqlen = 2048
-        input_tok = get_test_tokens_ppl(
-            dataset, seed=0, seqlen=seqlen, tokenizer=tokenizer
+    for dataset in datasets:
+        testloader = get_loaders(
+            dataset, tokenizer, seed=0, seqlen=ppl_seqlen, test_only=True
         )
-        nsamples = input_tok.numel() // seqlen
-        input_tok = input_tok[0, : (seqlen * nsamples)].view(nsamples, seqlen)
+        if "c4" in dataset:
+            testenc = testloader
+        else:
+            testenc = testloader.input_ids
 
-        loss_fct = torch.nn.CrossEntropyLoss().cuda()
-        acc_loss = 0.0
-        progress = tqdm(range(nsamples))
-        for ii in progress:
-            input = input_tok[ii, :].cuda().view(1, -1)
-            output = model(
-                input,
-                use_cache=False,
-                output_hidden_states=False,
-                output_attentions=False,
-            )[0]
-            shift_logits = output[:, :-1, :].contiguous()
-            shift_labels = input[:, 1:]
-            loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+        seqlen = ppl_seqlen
+        nsamples = testenc.numel() // seqlen
+        use_cache = model.config.use_cache
+        model.config.use_cache = False
+        model.eval()
+        nlls = []
+        if hasattr(model, "lm_head") and isinstance(model.lm_head, nn.Linear):
+            classifier = model.lm_head
+        elif hasattr(model.model, "lm_head"):
+            # for gptqmodels
+            classifier = None
+        elif hasattr(model, "output"):
+            # for internlm
+            classifier = model.output
+        else:
+            raise NotImplementedError
+        for i in tqdm(range(nsamples)):
+            batch = testenc[:, (i * seqlen) : ((i + 1) * seqlen)].to(model.device)
+            outputs = model.model(batch)
+            if classifier is not None:
+                hidden_states = outputs[0]
+                logits = classifier(hidden_states.to(classifier.weight.dtype))
+            else:
+                logits = outputs[0]
+            shift_logits = logits[:, :-1, :]
+            shift_labels = testenc[:, (i * seqlen) : ((i + 1) * seqlen)][:, 1:].to(
+                shift_logits.device
             )
-            acc_loss += loss.item()
-            progress.set_description(f"avg_loss = {acc_loss/(ii+1)}")
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+            )
+            neg_log_likelihood = loss.float() * seqlen
+            nlls.append(neg_log_likelihood)
 
-        avg_loss = acc_loss / nsamples
-
-        ppl = torch.exp(torch.tensor(avg_loss)).item()
-        print(f"{dataset} perplexity: {ppl}")
+        ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * seqlen))
+        print(f"{dataset}:{ppl}")
+        results[dataset] = ppl.item()
+    model.config.use_cache = use_cache
+    return results
 
 
 class BlockTrainDataset(Dataset):
